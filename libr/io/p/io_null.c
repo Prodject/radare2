@@ -102,8 +102,9 @@ static RIODesc* __open(RIO* io, const char* pathname, int rw, int mode) {
 
 RIOPlugin r_io_plugin_null = {
 	.name = "null",
-	.desc = "null-plugin (null://23)",
+	.desc = "Null plugin",
 	.license = "LGPL3",
+	.uris = "null://",
 	.open = __open,
 	.close = __close,
 	.read = __read,
@@ -113,7 +114,7 @@ RIOPlugin r_io_plugin_null = {
 	.resize = __resize,
 };
 
-#ifndef CORELIB
+#ifndef R2_PLUGIN_INCORE
 R_API RLibStruct radare_plugin = {
 	.type = R_LIB_TYPE_IO,
 	.data = &r_io_plugin_null,

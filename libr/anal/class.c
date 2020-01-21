@@ -4,9 +4,6 @@
 #include <r_vector.h>
 #include "../include/r_anal.h"
 
-#define CLASSES_FLAGSPACE "classes"
-
-
 static void r_anal_class_base_delete_class(RAnal *anal, const char *class_name);
 static void r_anal_class_method_delete_class(RAnal *anal, const char *class_name);
 static void r_anal_class_vtable_delete_class(RAnal *anal, const char *class_name);
@@ -53,7 +50,6 @@ static const char *attr_type_id(RAnalClassAttrType attr_type) {
 	}
 }
 
-
 R_API void r_anal_class_create(RAnal *anal, const char *name) {
 	char *name_sanitized = r_str_sanitize_sdb_key (name);
 	if (!name_sanitized) {
@@ -63,6 +59,10 @@ R_API void r_anal_class_create(RAnal *anal, const char *name) {
 	if (!sdb_exists (anal->sdb_classes, key)) {
 		sdb_set (anal->sdb_classes, key, "c", 0);
 	}
+
+	REventClass event = { .name = name_sanitized };
+	r_event_send (anal->ev, R_EVENT_CLASS_NEW, &event);
+
 	free (name_sanitized);
 }
 
@@ -106,6 +106,9 @@ R_API void r_anal_class_delete(RAnal *anal, const char *name) {
 	free (attr_type_array);
 
 	sdb_remove (anal->sdb_classes_attrs, key_attr_types (class_name_sanitized), 0);
+
+	REventClass event = { .name = class_name_sanitized };
+	r_event_send (anal->ev, R_EVENT_CLASS_DEL, &event);
 
 	free (class_name_sanitized);
 }
@@ -190,6 +193,12 @@ R_API RAnalClassErr r_anal_class_rename(RAnal *anal, const char *old_name, const
 
 	rename_key (anal->sdb_classes_attrs, key_attr_types (old_name_sanitized), key_attr_types (new_name_sanitized));
 
+	REventClassRename event = {
+		.name_old = old_name_sanitized,
+		.name_new = new_name_sanitized
+	};
+	r_event_send (anal->ev, R_EVENT_CLASS_RENAME, &event);
+
 beach:
 	free (old_name_sanitized);
 	free (new_name_sanitized);
@@ -238,6 +247,16 @@ static RAnalClassErr r_anal_class_set_attr_raw(RAnal *anal, const char *class_na
 	sdb_array_add (anal->sdb_classes_attrs, key_attr_type_attrs (class_name, attr_type_str), attr_id, 0);
 	sdb_set (anal->sdb_classes_attrs, key_attr_content (class_name, attr_type_str, attr_id), content, 0);
 
+	REventClassAttrSet event = {
+		.attr = {
+			.class_name = class_name,
+			.attr_type = attr_type,
+			.attr_id = attr_id
+		},
+		.content = content
+	};
+	r_event_send (anal->ev, R_EVENT_CLASS_ATTR_SET, &event);
+
 	return R_ANAL_CLASS_ERR_SUCCESS;
 }
 
@@ -275,6 +294,13 @@ static RAnalClassErr r_anal_class_delete_attr_raw(RAnal *anal, const char *class
 	if (!sdb_exists (anal->sdb_classes_attrs, key)) {
 		sdb_array_remove (anal->sdb_classes_attrs, key_attr_types (class_name), attr_type_str, 0);
 	}
+
+	REventClassAttr event = {
+		.class_name = class_name,
+		.attr_type = attr_type,
+		.attr_id = attr_id
+	};
+	r_event_send (anal->ev, R_EVENT_CLASS_ATTR_DEL, &event);
 
 	return R_ANAL_CLASS_ERR_SUCCESS;
 }
@@ -330,6 +356,16 @@ static RAnalClassErr r_anal_class_rename_attr_raw(RAnal *anal, const char *class
 		free (content);
 	}
 
+	REventClassAttrRename event = {
+		.attr = {
+			.class_name = class_name,
+			.attr_type = attr_type,
+			.attr_id = attr_id_old
+		},
+		.attr_id_new = attr_id_new
+	};
+	r_event_send (anal->ev, R_EVENT_CLASS_ATTR_RENAME, &event);
+
 	return R_ANAL_CLASS_ERR_SUCCESS;
 }
 
@@ -382,37 +418,32 @@ static char *flagname_attr(const char *attr_type, const char *class_name, const 
 }
 
 static void r_anal_class_set_flag(RAnal *anal, const char *name, ut64 addr) {
-	if (!name || !anal->flb.set || !anal->flb.push_fs || !anal->flb.pop_fs) {
+	if (!name || !anal->flg_class_set) {
 		return;
 	}
-	anal->flb.push_fs (anal->flb.f, CLASSES_FLAGSPACE);
-	anal->flb.set (anal->flb.f, name, addr, 0);
-	anal->flb.pop_fs (anal->flb.f);
+	anal->flg_class_set (anal->flb.f, name, addr, 0);
 }
 
 static void r_anal_class_unset_flag(RAnal *anal, const char *name) {
-	if (!name || !anal->flb.unset_name || !anal->flb.push_fs || !anal->flb.pop_fs) {
+	if (!name || !anal->flb.unset_name || !anal->flg_class_get) {
 		return;
 	}
-	anal->flb.push_fs (anal->flb.f, CLASSES_FLAGSPACE);
-	anal->flb.unset_name (anal->flb.f, name);
-	anal->flb.pop_fs (anal->flb.f);
+	if (anal->flg_class_get (anal->flb.f, name)) {
+		anal->flb.unset_name (anal->flb.f, name);
+	}
 }
 
 static void r_anal_class_rename_flag(RAnal *anal, const char *old_name, const char *new_name) {
-	if (!old_name || !new_name || !anal->flb.set || !anal->flb.get || !anal->flb.push_fs || !anal->flb.pop_fs || !anal->flb.unset_name) {
+	if (!old_name || !new_name || !anal->flb.unset || !anal->flg_class_get || !anal->flg_class_set) {
 		return;
 	}
-	anal->flb.push_fs (anal->flb.f, CLASSES_FLAGSPACE);
-	RFlagItem *flag = anal->flb.get (anal->flb.f, old_name);
+	RFlagItem *flag = anal->flg_class_get (anal->flb.f, old_name);
 	if (!flag) {
-		anal->flb.pop_fs (anal->flb.f);
 		return;
 	}
 	ut64 addr = flag->offset;
 	anal->flb.unset (anal->flb.f, flag);
-	anal->flb.set (anal->flb.f, new_name, addr, 0);
-	anal->flb.pop_fs (anal->flb.f);
+	anal->flg_class_set (anal->flb.f, new_name, addr, 0);
 }
 
 static RAnalClassErr r_anal_class_add_attr_unique_raw(RAnal *anal, const char *class_name, RAnalClassAttrType attr_type, const char *content, char *attr_id_out, size_t attr_id_out_size) {
@@ -1010,6 +1041,7 @@ static void r_anal_class_json(RAnal *anal, PJ *j, const char *class_name) {
 			pj_ks (j, "id", vtable->id);
 			pj_kn (j, "addr", vtable->addr);
 			pj_kn (j, "offset", vtable->offset);
+			pj_end (j);
 		}
 	}
 	pj_end (j);
@@ -1059,6 +1091,7 @@ static void r_anal_class_list_json(RAnal *anal) {
 	r_anal_class_foreach (anal, r_anal_class_list_json_cb, &ctx);
 
 	pj_end (j);
+	r_cons_printf ("%s\n", pj_string (j));
 	pj_free (j);
 }
 

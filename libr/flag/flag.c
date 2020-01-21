@@ -1,4 +1,4 @@
-/* radare - LGPL - Copyright 2007-2018 - pancake */
+/* radare - LGPL - Copyright 2007-2019 - pancake, ret2libc */
 
 #include <r_flag.h>
 #include <r_util.h>
@@ -7,8 +7,8 @@
 
 R_LIB_VERSION(r_flag);
 
-#define IS_FI_NOTIN_SPACE(f, i) ((f)->space_idx != -1 && (i)->space != (f)->space_idx)
-#define IS_FI_IN_SPACE(fi, spidx) ((spidx) == -1 || (fi)->space == (spidx))
+#define IS_FI_NOTIN_SPACE(f, i) (r_flag_space_cur (f) && (i)->space != r_flag_space_cur (f))
+#define IS_FI_IN_SPACE(fi, sp) (!(sp) || (fi)->space == (sp))
 #define STRDUP_OR_NULL(s) (!R_STR_ISEMPTY (s)? strdup (s): NULL)
 
 static const char *str_callback(RNum *user, ut64 off, int *ok) {
@@ -45,11 +45,10 @@ static int flag_skiplist_cmp(const void *va, const void *vb) {
 
 static ut64 num_callback(RNum *user, const char *name, int *ok) {
 	RFlag *f = (RFlag *)user;
-	RFlagItem *item;
 	if (ok) {
 		*ok = 0;
 	}
-	item = ht_pp_find (f->ht_name, name, NULL);
+	RFlagItem *item = ht_pp_find (f->ht_name, name, NULL);
 	if (item) {
 		// NOTE: to avoid warning infinite loop here we avoid recursivity
 		if (item->alias) {
@@ -139,9 +138,11 @@ static void set_name(RFlagItem *item, char *name) {
 	item->realname = item->name;
 }
 
-static bool update_flag_item_offset(RFlag *f, RFlagItem *item, ut64 newoff, bool force) {
+static bool update_flag_item_offset(RFlag *f, RFlagItem *item, ut64 newoff, bool is_new, bool force) {
 	if (item->offset != newoff || force) {
-		remove_offsetmap (f, item);
+		if (!is_new) {
+			remove_offsetmap (f, item);
+		}
 		item->offset = newoff;
 
 		RFlagsAtOffset *flagsAtOffset = flags_at_offset (f, newoff);
@@ -157,32 +158,25 @@ static bool update_flag_item_offset(RFlag *f, RFlagItem *item, ut64 newoff, bool
 }
 
 static bool update_flag_item_name(RFlag *f, RFlagItem *item, const char *newname, bool force) {
-	bool res = false;
-	if (!newname) {
+	if (!f || !item || !newname) {
 		return false;
 	}
-
 	if (!force && (item->name == newname || (item->name && !strcmp (item->name, newname)))) {
 		return false;
 	}
-
-	char *filtered_name= filter_item_name (newname);
-	if (!filtered_name) {
+	char *fname = filter_item_name (newname);
+	if (!fname) {
 		return false;
 	}
-
-	if (item->name) {
-		res = ht_pp_update_key (f->ht_name, item->name, filtered_name);
-	} else {
-		res = ht_pp_insert (f->ht_name, filtered_name, item);
-	}
-
+	bool res = (item->name)
+		? ht_pp_update_key (f->ht_name, item->name, fname)
+		: ht_pp_insert (f->ht_name, fname, item);
 	if (res) {
-		set_name (item, filtered_name);
-	} else {
-		free (filtered_name);
+		set_name (item, fname);
+		return true;
 	}
-	return res;
+	free (fname);
+	return false;
 }
 
 static void ht_free_flag(HtPPKv *kv) {
@@ -190,8 +184,38 @@ static void ht_free_flag(HtPPKv *kv) {
 	r_flag_item_free (kv->value);
 }
 
+static bool count_flags(RFlagItem *fi, void *user) {
+	int *count = (int *)user;
+	(*count)++;
+	return true;
+}
+
+static bool unset_flags_space(RFlagItem *fi, void *user) {
+	fi->space = NULL;
+	return true;
+}
+
+static void count_flags_in_space(REvent *ev, int type, void *user, void *data) {
+	RSpaces *sp = (RSpaces *)ev->user;
+	RFlag *f = container_of (sp, RFlag, spaces);
+	RSpaceEvent *spe = (RSpaceEvent *)data;
+	r_flag_foreach_space (f, spe->data.count.space, count_flags, &spe->res);
+}
+
+static void unset_flagspace(REvent *ev, int type, void *user, void *data) {
+	RSpaces *sp = (RSpaces *)ev->user;
+	RFlag *f = container_of (sp, RFlag, spaces);
+	const RSpaceEvent *spe = (const RSpaceEvent *)data;
+	r_flag_foreach_space (f, spe->data.unset.space, unset_flags_space, NULL);
+}
+
+static void new_spaces(RFlag *f) {
+	r_spaces_init (&f->spaces, "fs");
+	r_event_hook (f->spaces.event, R_SPACE_EVENT_COUNT, count_flags_in_space, NULL);
+	r_event_hook (f->spaces.event, R_SPACE_EVENT_UNSET, unset_flagspace, NULL);
+}
+
 R_API RFlag *r_flag_new() {
-	int i;
 	RFlag *f = R_NEW0 (RFlag);
 	if (!f) {
 		return NULL;
@@ -209,12 +233,6 @@ R_API RFlag *r_flag_new() {
 	f->zones = NULL;
 #endif
 	f->tags = sdb_new0 ();
-	f->space_idx = -1;
-	f->spacestack = r_list_newf (NULL);
-	if (!f->spacestack) {
-		r_flag_free (f);
-		return NULL;
-	}
 	f->ht_name = ht_pp_new (NULL, ht_free_flag, NULL);
 	f->by_off = r_skiplist_new (flag_skiplist_free, flag_skiplist_cmp);
 #if R_FLAG_ZONE_USE_SDB
@@ -222,9 +240,7 @@ R_API RFlag *r_flag_new() {
 #else
 	r_list_free (f->zones);
 #endif
-	for (i = 0; i < R_FLAG_SPACES_MAX; i++) {
-		f->spaces[i] = NULL;
-	}
+	new_spaces(f);
 	return f;
 }
 
@@ -261,16 +277,12 @@ R_API void r_flag_item_free(RFlagItem *item) {
 
 R_API RFlag *r_flag_free(RFlag *f) {
 	r_return_val_if_fail (f, NULL);
-	int i;
-	for (i = 0; i < R_FLAG_SPACES_MAX; i++) {
-		free (f->spaces[i]);
-	}
 	r_skiplist_free (f->by_off);
 	ht_pp_free (f->ht_name);
-
 	sdb_free (f->tags);
-	r_list_free (f->spacestack);
+	r_spaces_fini (&f->spaces);
 	r_num_free (f->num);
+	r_list_free (f->zones);
 	free (f);
 	return NULL;
 }
@@ -287,7 +299,7 @@ struct print_flag_t {
 	bool in_range;
 	ut64 range_from;
 	ut64 range_to;
-	int fs;
+	RSpace *fs;
 	bool real;
 	const char *pfx;
 };
@@ -298,12 +310,15 @@ static bool print_flag_json(RFlagItem *flag, void *user) {
 		return true;
 	}
 	pj_o (u->pj);
-	pj_ks (u->pj, "name", u->real ? flag->realname : flag->name);
+	pj_ks (u->pj, "name", flag->name);
+	if (flag->name != flag->realname) {
+		pj_ks (u->pj, "realname", flag->realname);
+	}
 	pj_ki (u->pj, "size", flag->size);
 	if (flag->alias) {
 		pj_ks (u->pj, "alias", flag->alias);
 	} else {
-		pj_ki (u->pj, "offset", flag->offset);
+		pj_kn (u->pj, "offset", flag->offset);
 	}
 	if (flag->comment) {
 		pj_ks (u->pj, "comment", flag->comment);
@@ -314,29 +329,37 @@ static bool print_flag_json(RFlagItem *flag, void *user) {
 
 static bool print_flag_rad(RFlagItem *flag, void *user) {
 	struct print_flag_t *u = (struct print_flag_t *)user;
+	char *comment_b64 = NULL, *tmp = NULL;
 	if (u->in_range && (flag->offset < u->range_from || flag->offset >= u->range_to)) {
 		return true;
 	}
-	if (u->fs == -1 || flag->space != u->fs) {
+	if (!u->fs || flag->space != u->fs) {
 		u->fs = flag->space;
-		const char *flagspace = r_flag_space_get_i (u->f, u->fs);
-		if (!flagspace || !*flagspace) {
-			flagspace = "*";
+		u->f->cb_printf ("fs %s\n", u->fs? u->fs->name: "*");
+	}
+	if (flag->comment && *flag->comment) {
+		comment_b64 = r_base64_encode_dyn (flag->comment, -1);
+		// prefix the armored string with "base64:"
+		if (comment_b64) {
+			tmp = r_str_newf ("base64:%s", comment_b64);
+			free (comment_b64);
+			comment_b64 = tmp;
 		}
-		u->f->cb_printf ("fs %s\n", flagspace);
 	}
 	if (flag->alias) {
 		u->f->cb_printf ("fa %s %s\n", flag->name, flag->alias);
-		if (flag->comment && *flag->comment) {
+		if (comment_b64) {
 			u->f->cb_printf ("\"fC %s %s\"\n",
-				flag->name, flag->comment);
+				flag->name, comment_b64? comment_b64: "");
 		}
 	} else {
 		u->f->cb_printf ("f %s %" PFMT64d " 0x%08" PFMT64x "%s%s %s\n",
 			flag->name, flag->size, flag->offset,
 			u->pfx? "+": "", u->pfx? u->pfx: "",
-			flag->comment? flag->comment: "");
+			comment_b64? comment_b64: "");
 	}
+
+	free (comment_b64);
 	return true;
 }
 
@@ -357,10 +380,10 @@ static bool print_flag_orig_name(RFlagItem *flag, void *user) {
 
 /* print with r_cons the flag items in the flag f, given as a parameter */
 R_API void r_flag_list(RFlag *f, int rad, const char *pfx) {
+	r_return_if_fail (f);
 	bool in_range = false;
 	ut64 range_from = UT64_MAX;
 	ut64 range_to = UT64_MAX;
-	int fs = -1;
 	if (rad == 'i') {
 		char *sp, *arg = strdup (pfx + 1);
 		sp = strchr (arg,  ' ');
@@ -385,7 +408,7 @@ R_API void r_flag_list(RFlag *f, int rad, const char *pfx) {
 
 	switch (rad) {
 	case 'q':
-		r_flag_foreach_space (f, f->space_idx, print_flag_name, f);
+		r_flag_foreach_space (f, r_flag_space_cur (f), print_flag_name, f);
 		break;
 	case 'j': {
 		PJ *pj = pj_new ();
@@ -398,7 +421,7 @@ R_API void r_flag_list(RFlag *f, int rad, const char *pfx) {
 			.real = false
 		};
 		pj_a (pj);
-		r_flag_foreach_space (f, f->space_idx, print_flag_json, &u);
+		r_flag_foreach_space (f, r_flag_space_cur (f), print_flag_json, &u);
 		pj_end (pj);
 		f->cb_printf ("%s\n", pj_string (pj));
 		pj_free (pj);
@@ -411,10 +434,10 @@ R_API void r_flag_list(RFlag *f, int rad, const char *pfx) {
 			.in_range = in_range,
 			.range_from = range_from,
 			.range_to = range_to,
-			.fs = fs,
+			.fs = NULL,
 			.pfx = pfx
 		};
-		r_flag_foreach_space (f, f->space_idx, print_flag_rad, &u);
+		r_flag_foreach_space (f, r_flag_space_cur (f), print_flag_rad, &u);
 		break;
 	}
 	default:
@@ -427,7 +450,7 @@ R_API void r_flag_list(RFlag *f, int rad, const char *pfx) {
 				.range_to = range_to,
 				.real = (rad == 'n')
 			};
-			r_flag_foreach_space (f, f->space_idx, print_flag_orig_name, &u);
+			r_flag_foreach_space (f, r_flag_space_cur (f), print_flag_orig_name, &u);
 		} else {
 			PJ *pj = pj_new ();
 			struct print_flag_t u = {
@@ -439,7 +462,7 @@ R_API void r_flag_list(RFlag *f, int rad, const char *pfx) {
 				.real = true
 			};
 			pj_a (pj);
-			r_flag_foreach_space (f, f->space_idx, print_flag_json, &u);
+			r_flag_foreach_space (f, r_flag_space_cur (f), print_flag_json, &u);
 			pj_end (pj);
 			f->cb_printf ("%s\n", pj_string (pj));
 			pj_free (pj);
@@ -464,12 +487,11 @@ R_API bool r_flag_exist_at(RFlag *f, const char *flag_prefix, ut16 fp_size, ut64
 	RListIter *iter = NULL;
 	RFlagItem *item = NULL;
 	const RList *list = r_flag_get_list (f, off);
-	if (!list) {
-		return false;
-	}
-	r_list_foreach (list, iter, item) {
-		if (item->name && !strncmp (item->name, flag_prefix, fp_size)) {
-			return true;
+	if (list) {
+		r_list_foreach (list, iter, item) {
+			if (item->name && !strncmp (item->name, flag_prefix, fp_size)) {
+				return true;
+			}
 		}
 	}
 	return false;
@@ -487,56 +509,88 @@ R_API RFlagItem *r_flag_get(RFlag *f, const char *name) {
 R_API RFlagItem *r_flag_get_i(RFlag *f, ut64 off) {
 	r_return_val_if_fail (f, NULL);
 	const RList *list = r_flag_get_list (f, off);
-	return list ? evalFlag (f, r_list_get_top (list)) : NULL;
+	return list? evalFlag (f, r_list_get_top (list)): NULL;
 }
 
-/* return the first flag item at offset "off" that doesn't start with "loc.",
- * "fcn.", "section." or NULL if such a flag doesn't exist.
- *
- * XXX: this function is buggy and it's not really clear what's the purpose */
-R_API RFlagItem *r_flag_get_i2(RFlag *f, ut64 off) {
+/* return the first flag that matches an offset ordered by the order of
+ * operands to the function.
+ * Pass in the name of each space, in order, followed by a NULL */
+R_API RFlagItem *r_flag_get_by_spaces(RFlag *f, ut64 off, ...) {
 	r_return_val_if_fail (f, NULL);
-	RFlagItem *oitem = NULL, *item = NULL;
-	RListIter *iter;
+
 	const RList *list = r_flag_get_list (f, off);
-	if (!list) {
-		return NULL;
+	RFlagItem *ret = NULL;
+	const char *spacename;
+	RSpace **spaces;
+	RListIter *iter;
+	RFlagItem *flg;
+	va_list ap, aq;
+	size_t n_spaces = 0, i;
+
+	va_start (ap, off);
+	// some quick checks for common cases
+	if (r_list_empty (list)) {
+		goto beach;
 	}
-	r_list_foreach (list, iter, item) {
-		if (!item->name) {
-			continue;
+	if (r_list_length (list) == 1) {
+		ret = r_list_get_top (list);
+		goto beach;
+	}
+
+	// count spaces in the vaarg
+	va_copy (aq, ap);
+	spacename = va_arg (aq, const char *);
+	while (spacename) {
+		n_spaces++;
+		spacename = va_arg (aq, const char *);
+	}
+	va_end (aq);
+
+	// get RSpaces from the names
+	i = 0;
+	spaces = R_NEWS (RSpace *, n_spaces);
+	spacename = va_arg (ap, const char *);
+	while (spacename) {
+		RSpace *space = r_flag_space_get (f, spacename);
+		if (space) {
+			spaces[i++] = space;
 		}
-		/* catch sym. first */
-		if (!strncmp (item->name, "loc.", 4)) {
-			continue;
+		spacename = va_arg (ap, const char *);
+	}
+	n_spaces = i;
+
+	ut64 min_space_i = n_spaces + 1;
+	r_list_foreach (list, iter, flg) {
+		// get the "priority" of the flag flagspace and
+		// check if better than what we found so far
+		for (i = 0; i < n_spaces; ++i) {
+			if (flg->space == spaces[i]) {
+				break;
+			}
+			if (i >= min_space_i) {
+				break;
+			}
 		}
-		if (!strncmp (item->name, "fcn.", 4)) {
-			continue;
+
+		if (i < min_space_i) {
+			min_space_i = i;
+			ret = flg;
 		}
-		if (!strncmp (item->name, "section.", 8)) {
-			continue;
-		}
-		if (!strncmp (item->name, "section_end.", 12)) {
-			continue;
-		}
-		if (r_str_nlen (item->name, 5) > 4 &&
-		    item->name[3] == '.') {
-			oitem = item;
+		if (!min_space_i) {
+			// this is the best flag we can find, let's stop immediately
 			break;
 		}
-		oitem = item;
-		if (strlen (item->name) < 5 || item->name[3] != '.') {
-			continue;
-		}
-		oitem = item;
 	}
-	return oitem? evalFlag (f, oitem): NULL;
+	free (spaces);
+beach:
+	va_end (ap);
+	return ret? evalFlag (f, ret): NULL;
 }
 
 static bool isFunctionFlag(const char *n) {
 	return (!strncmp (n, "sym.func.", 9)
 	|| !strncmp (n, "method.", 7)
-	|| !strncmp (n, "sym.", 7)
+	|| !strncmp (n, "sym.", 4)
 	|| !strncmp (n, "func.", 5)
 	|| !strncmp (n, "fcn.0", 5));
 }
@@ -554,7 +608,7 @@ R_API RFlagItem *r_flag_get_at(RFlag *f, ut64 off, bool closest) {
 	}
 	if (flags_at->off == off) {
 		r_list_foreach (flags_at->flags, iter, item) {
-			if (f->space_idx != -1 && item->space != f->space_idx) {
+			if (IS_FI_NOTIN_SPACE (f, item)) {
 				continue;
 			}
 			if (nice) {
@@ -573,7 +627,7 @@ R_API RFlagItem *r_flag_get_at(RFlag *f, ut64 off, bool closest) {
 	}
 	while (!nice && flags_at) {
 		r_list_foreach (flags_at->flags, iter, item) {
-			if (f->space_strict && IS_FI_NOTIN_SPACE (f, item)) {
+			if (IS_FI_NOTIN_SPACE (f, item)) {
 				continue;
 			}
 			if (item->offset == off) {
@@ -592,17 +646,20 @@ R_API RFlagItem *r_flag_get_at(RFlag *f, ut64 off, bool closest) {
 	return nice? evalFlag (f, nice): NULL;
 }
 
-static bool append_to_list(void *user, const void *k, const void *v) {
+static bool append_to_list(RFlagItem *fi, void *user) {
 	RList *ret = (RList *)user;
-	r_list_append (ret, (RFlagItem *)v);
+	r_list_append (ret, fi);
 	return true;
 }
 
-R_API RList *r_flag_all_list(RFlag *f) {
+R_API RList *r_flag_all_list(RFlag *f, bool by_space) {
 	RList *ret = r_list_new ();
-	if (ret) {
-		ht_pp_foreach (f->ht_name, append_to_list, ret);
+	if (!ret) {
+		return NULL;
 	}
+
+	RSpace *cur = by_space? r_flag_space_cur (f): NULL;
+	r_flag_foreach_space (f, cur, append_to_list, ret);
 	return ret;
 }
 
@@ -631,7 +688,6 @@ R_API RFlagItem *r_flag_set_next(RFlag *f, const char *name, ut64 off, ut32 size
 	if (!r_flag_get (f, name)) {
 		return r_flag_set (f, name, off, size);
 	}
-
 	int i, newNameSize = strlen (name);
 	char *newName = malloc (newNameSize + 16);
 	if (!newName) {
@@ -657,6 +713,7 @@ R_API RFlagItem *r_flag_set_next(RFlag *f, const char *name, ut64 off, ut32 size
 R_API RFlagItem *r_flag_set(RFlag *f, const char *name, ut64 off, ut32 size) {
 	r_return_val_if_fail (f && name && *name, NULL);
 
+	bool is_new = false;
 	char *itemname = filter_item_name (name);
 	if (!itemname) {
 		return NULL;
@@ -674,12 +731,13 @@ R_API RFlagItem *r_flag_set(RFlag *f, const char *name, ut64 off, ut32 size) {
 		if (!item) {
 			goto err;
 		}
+		is_new = true;
 	}
 
-	item->space = f->space_idx;
+	item->space = r_flag_space_cur (f);
 	item->size = size;
 
-	update_flag_item_offset (f, item, off + f->base, true);
+	update_flag_item_offset (f, item, off + f->base, is_new, true);
 	update_flag_item_name (f, item, name, true);
 	return item;
 err:
@@ -706,6 +764,14 @@ R_API void r_flag_item_set_realname(RFlagItem *item, const char *realname) {
 	r_return_if_fail (item);
 	free_item_realname (item);
 	item->realname = R_STR_ISEMPTY (realname)? NULL: strdup (realname);
+}
+
+/* add/replace/remove the color of a flag item */
+R_API const char *r_flag_item_set_color(RFlagItem *item, const char *color) {
+	r_return_val_if_fail (item, NULL);
+	free (item->color);
+	item->color = (color && *color) ? strdup (color) : NULL;
+	return item->color;
 }
 
 /* change the name of a flag item, if the new name is available.
@@ -774,11 +840,11 @@ R_API bool r_flag_unset_name(RFlag *f, const char *name) {
 /* unset all flag items in the RFlag f */
 R_API void r_flag_unset_all(RFlag *f) {
 	r_return_if_fail (f);
-	f->space_idx = -1;
 	ht_pp_free (f->ht_name);
 	f->ht_name = ht_pp_new (NULL, ht_free_flag, NULL);
 	r_skiplist_purge (f->by_off);
-	r_flag_space_unset (f, NULL);
+	r_spaces_fini (&f->spaces);
+	new_spaces (f);
 }
 
 struct flag_relocate_t {
@@ -797,7 +863,7 @@ static bool flag_relocate_foreach(RFlagItem *fi, void *user) {
 	if (fn == on) {
 		ut64 fm = fi->offset & u->off_mask;
 		ut64 om = u->to & u->off_mask;
-		update_flag_item_offset (u->f, fi, (u->to & u->neg_mask) + fm + om, false);
+		update_flag_item_offset (u->f, fi, (u->to & u->neg_mask) + fm + om, false, false);
 		u->n++;
 	}
 	return true;
@@ -828,16 +894,6 @@ R_API bool r_flag_move(RFlag *f, ut64 at, ut64 to) {
 	return false;
 }
 
-R_API const char *r_flag_color(RFlag *f, RFlagItem *it, const char *color) {
-	r_return_val_if_fail (f && it, NULL);
-	if (!color) {
-		return it->color;
-	}
-	free (it->color);
-	it->color = *color ? strdup (color) : NULL;
-	return it->color;
-}
-
 // BIND
 R_API void r_flag_bind(RFlag *f, RFlagBind *fb) {
 	r_return_if_fail (f && fb);
@@ -863,7 +919,6 @@ static bool flag_count_foreach(RFlagItem *fi, void *user) {
 R_API int r_flag_count(RFlag *f, const char *glob) {
 	int count = 0;
 	r_return_val_if_fail (f, -1);
-
 	r_flag_foreach_glob (f, glob, flag_count_foreach, &count);
 	return count;
 }
@@ -874,10 +929,12 @@ R_API int r_flag_count(RFlag *f, const char *glob) {
 	RListIter *it2, *tmp2;	  \
 	RFlagItem *fi; \
 	r_skiplist_foreach_safe (f->by_off, it, tmp, flags_at) { \
-		r_list_foreach_safe (flags_at->flags, it2, tmp2, fi) {	\
-			if (condition) { \
-				if (!cb (fi, user)) { \
-					return; \
+		if (flags_at) { \
+			r_list_foreach_safe (flags_at->flags, it2, tmp2, fi) {	\
+				if (condition) { \
+					if (!cb (fi, user)) { \
+						return; \
+					} \
 				} \
 			} \
 		} \
@@ -900,6 +957,10 @@ R_API void r_flag_foreach_glob(RFlag *f, const char *glob, RFlagItemCb cb, void 
 	FOREACH_BODY (!glob || r_str_glob (fi->name, glob));
 }
 
-R_API void r_flag_foreach_space(RFlag *f, int space, RFlagItemCb cb, void *user) {
+R_API void r_flag_foreach_space_glob(RFlag *f, const char *glob, const RSpace *space, RFlagItemCb cb, void *user) {
+        FOREACH_BODY (IS_FI_IN_SPACE (fi, space) && (!glob || r_str_glob (fi->name, glob)));
+}
+
+R_API void r_flag_foreach_space(RFlag *f, const RSpace *space, RFlagItemCb cb, void *user) {
 	FOREACH_BODY (IS_FI_IN_SPACE (fi, space));
 }

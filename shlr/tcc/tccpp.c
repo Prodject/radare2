@@ -211,7 +211,6 @@ static TokenSym *tok_alloc_new(TokenSym **pts, const char *str, int len)
 		ptable = realloc (table_ident, (i + TOK_ALLOC_INCR) * sizeof(TokenSym *));
 		table_ident = ptable;
 	}
-
 	ts = malloc (sizeof(TokenSym) + len);
 	table_ident[i] = ts;
 	ts->tok = tok_ident++;
@@ -361,7 +360,7 @@ addv:
 			return table_ident[v - TOK_IDENT]->str;
 		} else if (v >= SYM_FIRST_ANOM) {
 			/* special name for anonymous symbol */
-			sprintf (p, "L.%u", v - SYM_FIRST_ANOM);
+			sprintf (p, "%u", v - SYM_FIRST_ANOM);
 		} else {
 			/* should never happen */
 			return NULL;
@@ -1601,8 +1600,10 @@ include_trynext:
 			memcpy (filepath, file->filename, filepath_len);
 			strcpy (filepath + filepath_len, buf);
 			if (tcc_open (s1, filepath) < 0) {
-				int len = snprintf (filepath, sizeof (filepath),
-					"/usr/include/%s", buf);
+				if (!dirname) {
+					dirname = "/usr/include";
+				}
+				int len = snprintf (filepath, sizeof (filepath), "%s/%s", dirname, buf);
 				if (len >= sizeof (filepath) || tcc_open (s1, filepath) < 0) {
 					tcc_error ("include file '%s' not found", filepath);
 				} else {

@@ -12,7 +12,6 @@
 #include <r_util.h>
 #include <ctype.h>
 #include <stdio.h>
-#include <unistd.h>
 
 /* accessors */
 static inline RNumCalcValue Nset(ut64 v) { RNumCalcValue n; n.d = (double)v; n.n = v; return n; }
@@ -214,7 +213,7 @@ static int cin_get(RNum *num, RNumCalc *nc, char *c) {
 		*c = nc->oc;
 		nc->oc = 0;
 	} else {
-		if (!nc->calc_buf) {
+		if (!nc->calc_buf || !*nc->calc_buf) {
 			return 0;
 		}
 		*c = nc->calc_buf[nc->calc_i];

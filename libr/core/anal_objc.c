@@ -1,12 +1,10 @@
 /* radare2 - LGPL - Copyright 2019 - pancake */
 
-#if 0
-
-This code has been written by pancake which has been based on Alvaro's r2pipe-python
-script which was based on FireEye script for IDA Pro.
-
-* https://www.fireeye.com/blog/threat-research/2017/03/introduction_to_reve.html
-#endif
+/* This code has been written by pancake which has been based on Alvaro's
+ * r2pipe-python script which was based on FireEye script for IDA Pro.
+ *
+ * https://www.fireeye.com/blog/threat-research/2017/03/introduction_to_reve.html
+ */
 
 #include <r_core.h>
 
@@ -21,8 +19,12 @@ typedef struct {
 	RBinSection *_data;
 } RCoreObjc;
 
-const bool isInvalid (ut64 addr) {
+static const bool isInvalid (ut64 addr) {
 	return (!addr || addr == UT64_MAX);
+}
+
+static const char *addr_key (ut64 va) {
+	return sdb_fmt ("refs.0x%08"PFMT64x, va);
 }
 
 static bool inBetween(RBinSection *s, ut64 addr) {
@@ -47,7 +49,8 @@ static ut64 readQword (RCoreObjc *objc, ut64 addr) {
 }
 
 static void objc_analyze(RCore *core) {
-	eprintf ("[+] Analyzing searching references to selref\n");
+	static const char *oldstr = NULL;
+	oldstr = r_print_rowlog (core->print, "Analyzing searching references to selref");
 	r_core_cmd0 (core, "aar");
 	if (!strcmp ("arm", r_config_get (core->config, "asm.arch"))) {
 		bool emu_lazy = r_config_get_i (core->config, "emu.lazy");
@@ -55,13 +58,15 @@ static void objc_analyze(RCore *core) {
 		r_core_cmd0 (core, "aae");
 		r_config_set_i (core->config, "emu.lazy", emu_lazy);
 	}
+	r_print_rowlog_done (core->print, oldstr);
 }
 
 static ut64 getRefPtr(RCoreObjc *objc, ut64 classMethodsVA, bool *res) {
 	ut64 namePtr = readQword (objc, classMethodsVA);
 	int i, cnt = 0;
 	ut64 res_at = 0LL;
-	const char *k = sdb_fmt ("refs.0x%08"PFMT64x, namePtr);
+	const char *k = addr_key (namePtr);
+
 	*res = false;
 	for (i = 0; ; i++) {
 		ut64 at = sdb_array_get_num (objc->db, k, i, NULL);
@@ -86,24 +91,22 @@ static ut64 getRefPtr(RCoreObjc *objc, ut64 classMethodsVA, bool *res) {
 
 static bool objc_build_refs(RCoreObjc *objc) {
 	ut64 off;
+	if (!objc->_const || !objc->_selrefs) {
+		return false;
+	}
 	
 	ut8 *buf = calloc (1, objc->_const->vsize);
 	if (!buf) {
 		return false;
 	}
-	r_io_read_at (objc->core->io, objc->_const->vaddr, buf, objc->_const->vsize);
-	for (off = 0; off < objc->_const->vsize; off += objc->word_size) {
+	(void)r_io_read_at (objc->core->io, objc->_const->vaddr, buf, objc->_const->vsize);
+	for (off = 0; off + 8 < objc->_const->vsize; off += objc->word_size) {
 		ut64 va = objc->_const->vaddr + off;
-		ut64 xrefs_to = readQword (objc, objc->_const->vaddr + off);
-		//  ut64 xrefs_to = r_read_le64 (buf + off);
+		ut64 xrefs_to = r_read_le64 (buf + off);
 		if (!xrefs_to) {
 			continue;
 		}
-		const char *k = sdb_fmt ("refs.0x%08"PFMT64x, va);
-if (va == 4298425544) {
-	eprintf ("VA2k %lld %lld\n", va,  xrefs_to);
-}
-		sdb_array_add_num (objc->db, k, xrefs_to, 0);
+		sdb_array_add_num (objc->db, addr_key (va), xrefs_to, 0);
 	}
 	free (buf);
 
@@ -112,24 +115,21 @@ if (va == 4298425544) {
 		return false;
 	}
 	r_io_read_at (objc->core->io, objc->_selrefs->vaddr, buf, objc->_selrefs->vsize);
-	for (off = 0; off < objc->_selrefs->vsize; off += objc->word_size) {
+	for (off = 0; off + 8 < objc->_selrefs->vsize; off += objc->word_size) {
 		ut64 va = objc->_selrefs->vaddr + off;
-		//ut64 xrefs_to = r_read_le64 (buf + off);
-		ut64 xrefs_to = readQword (objc, objc->_selrefs->vaddr + off);  //r_read_le64 (buf + off);
+		ut64 xrefs_to = r_read_le64 (buf + off);
 		if (!xrefs_to) {
 			continue;
 		}
-		const char *k = sdb_fmt ("refs.0x%08"PFMT64x, va);
-		sdb_array_add_num (objc->db, k, xrefs_to, 0);
-if (va == 4298425544) {
-	eprintf ("VA2s %lld %lld\n", va,  xrefs_to);
-}
+		sdb_array_add_num (objc->db, addr_key (xrefs_to), va, 0);
 	}
 	free (buf);
 	return true;
 }
 
 static bool objc_find_refs(RCore *core) {
+	static const char *oldstr = NULL;
+
 	RCoreObjc objc = {0};
 
 	const int objc2ClassSize = 0x28;
@@ -145,7 +145,7 @@ static bool objc_find_refs(RCore *core) {
 	if (!sections) {
 		return false;
 	}
-	eprintf ("[+] Parsing metadata in ObjC to find hidden xrefs\n");
+	
 	RBinSection *s;
 	RListIter *iter;
 	r_list_foreach (sections, iter, s) {
@@ -161,11 +161,15 @@ static bool objc_find_refs(RCore *core) {
 		}
 	}
 	if (!objc._const) {
-        	eprintf ("Could not find necessary objc_const section\n");
+		if (core->anal->verbose) {
+			eprintf ("Could not find necessary objc_const section\n");
+		}
 		return false;
 	}
 	if ((objc._selrefs || objc._msgrefs) && !(objc._data && objc._const)) {
-        	eprintf ("Could not find necessary Objective-C sections...\n");
+		if (core->anal->verbose) {
+			eprintf ("Could not find necessary Objective-C sections...\n");
+		}
 		return false;
 	}
 
@@ -173,13 +177,14 @@ static bool objc_find_refs(RCore *core) {
 	if (!objc_build_refs (&objc)) {
 		return false;
 	}
+	oldstr = r_print_rowlog (core->print, "Parsing metadata in ObjC to find hidden xrefs");
+	r_print_rowlog_done (core->print, oldstr);
 
 	int total = 0;
 	ut64 off;
 	for (off = 0; off < objc._data->vsize ; off += objc2ClassSize) {
 		ut64 va = objc._data->vaddr + off;
 		ut64 classRoVA = readQword (&objc, va + objc2ClassInfoOffs);
-		//eprintf ("crv %lld\n", classRoVA);
 		if (isInvalid (classRoVA)) {
 			continue;
 		}
@@ -189,7 +194,6 @@ static bool objc_find_refs(RCore *core) {
 		}
 
 		int count = readDword (&objc, classMethodsVA + 4);
-//eprintf ("COUNT %d\n", count);
 		classMethodsVA += 8; // advance to start of class methods array
 		ut64 from = classMethodsVA;
 		ut64 to = from + (objc2ClassMethSize * count);
@@ -197,49 +201,45 @@ static bool objc_find_refs(RCore *core) {
 		for (va2 = from; va2 < to; va2 += objc2ClassMethSize) {
 			bool isMsgRef = false;
 			ut64 selRefVA = getRefPtr (&objc, va2, &isMsgRef);
-if (va2 == 4298425544) {
-	eprintf ("VA2 %lld %lld\n", va2,  selRefVA);
-}
 			if (!selRefVA) {
 				continue;
 			}
-eprintf ("found ref %lld -> %lld\n",  from, to);
 			// # adjust pointer to beginning of message_ref struct to get xrefs
 			if (isMsgRef) {
 				selRefVA -= 8;
 			}
 			ut64 funcVA = readQword (&objc, va2 + objc2ClassMethImpOffs);
-			// add xref to func and change instruction to point to function instead of selref
-			const char *k = sdb_fmt ("refs.0x%08"PFMT64x, selRefVA);
-			int i;
-			for (i=0; ; i++) {
-				ut64 at = sdb_array_get_num (objc.db, k, i, NULL);
-				if (!at) {
-					break;
-				}
-				r_core_cmdf (core, "axC 0x%08"PFMT64x" 0x%08"PFMT64x,  funcVA, at);
+			RList *list = r_anal_xrefs_get (core->anal, selRefVA);
+			RListIter *iter;
+			RAnalRef *ref;
+			r_list_foreach (list, iter, ref) {
+				r_anal_xrefs_set (core->anal, ref->addr, funcVA, R_META_TYPE_CODE);
 				total++;
 			}
 		}
 
 	}
 	sdb_free (objc.db);
-	eprintf ("[+] A total of %d xref were found\n", total);
+	oldstr = r_print_rowlog (core->print, sdb_fmt ("A total of %d xref were found", total));
+	r_print_rowlog_done (core->print, oldstr);
 
 	ut64 from = objc._selrefs->vaddr;
 	ut64 to = from + objc._selrefs->vsize;
 	total = 0;
 	ut64 a;
 	for (a = from; a < to; a += objc.word_size) {
-		r_core_cmdf (core, "Cd 8 @ 0x%08"PFMT64x, a);
+		r_meta_add (core->anal, R_META_TYPE_DATA, a, a + 8, NULL);
 		total ++;
 	}
-	eprintf ("[+] Set %d dwords\n", total);
+	oldstr = r_print_rowlog (core->print, sdb_fmt ("Set %d dwords at 0x%08"PFMT64x, total, from));
+	r_print_rowlog_done (core->print, oldstr);
 	return true;
 }
 
-R_API int cmd_anal_objc (RCore *core, const char *input) {
-	objc_analyze (core);
+R_API int cmd_anal_objc (RCore *core, const char *input, bool auto_anal) {
+	if (!auto_anal) {
+		objc_analyze (core);
+	}
 	objc_find_refs (core);
 	return 0;
 }

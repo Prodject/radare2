@@ -11,7 +11,7 @@
 #include "../arch/wasm/wasm.h"
 
 static int disassemble(RAsm *a, RAsmOp *op, const ut8 *buf, int len) {
-	WasmOp wop = {0};
+	WasmOp wop = {{0}};
 	int ret = wasm_dis (&wop, buf, len);
 	r_asm_op_set_asm (op, wop.txt);
 	free (wop.txt);
@@ -38,7 +38,7 @@ RAsmPlugin r_asm_plugin_wasm = {
 	.assemble = &assemble
 };
 
-#ifndef CORELIB
+#ifndef R2_PLUGIN_INCORE
 R_API RLibStruct radare_plugin = {
 	.type = R_LIB_TYPE_ASM,
 	.data = &r_asm_plugin_wasm,

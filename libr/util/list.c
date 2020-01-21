@@ -1,4 +1,4 @@
-/* radare - LGPL - Copyright 2007-2018 - pancake, alvarofe */
+/* radare - LGPL - Copyright 2007-2019 - pancake, alvarofe */
 // TODO: RRef - reference counting
 
 #include <stdio.h>
@@ -64,16 +64,15 @@ R_API int r_list_length(const RList *list) {
 
 /* remove all elements of a list */
 R_API void r_list_purge(RList *list) {
-	RListIter *it;
-
 	r_return_if_fail (list);
 
-	it = list->head;
+	RListIter *it = list->head;
 	while (it) {
 		RListIter *next = it->n;
 		r_list_delete (list, it);
 		it = next;
 	}
+	list->length = 0;
 	list->head = list->tail = NULL;
 }
 
@@ -81,7 +80,7 @@ R_API void r_list_purge(RList *list) {
 R_API void r_list_free(RList *list) {
 	if (list) {
 		r_list_purge (list);
-		R_FREE (list);
+		free (list);
 	}
 }
 
@@ -107,15 +106,13 @@ R_API void r_list_delete(RList *list, RListIter *iter) {
 		list->free (iter->data);
 	}
 	iter->data = NULL;
-	R_FREE (iter);
+	free (iter);
 }
 
 R_API void r_list_split(RList *list, void *ptr) {
-	RListIter *iter;
-
 	r_return_if_fail (list);
 
-	iter = r_list_iterator (list);
+	RListIter *iter = r_list_iterator (list);
 	while (iter) {
 		void *item = iter->data;
 		if (ptr == item) {
@@ -163,6 +160,7 @@ R_API int r_list_join(RList *list1, RList *list2) {
 		list1->sorted = false;
 	}
 	list1->length += list2->length;
+	list2->length = 0;
 	list2->head = list2->tail = NULL;
 	return 1;
 }
@@ -186,10 +184,9 @@ R_API RList *r_list_newf(RListFree f) {
 
 R_API RListIter *r_list_item_new(void *data) {
 	RListIter *item = R_NEW0 (RListIter);
-	if (!item) {
-		return NULL;
+	if (item) {
+		item->data = data;
 	}
-	item->data = data;
 	return item;
 }
 
@@ -218,11 +215,9 @@ R_API RListIter *r_list_append(RList *list, void *data) {
 }
 
 R_API RListIter *r_list_prepend(RList *list, void *data) {
-	RListIter *item;
-
 	r_return_val_if_fail (list, NULL);
 
-	item = R_NEW0 (RListIter);
+	RListIter *item = R_NEW0 (RListIter);
 	if (!item) {
 		return NULL;
 	}
@@ -294,12 +289,11 @@ R_API void *r_list_pop(RList *list) {
 
 R_API void *r_list_pop_head(RList *list) {
 	void *data = NULL;
-	RListIter *iter;
 
 	r_return_val_if_fail (list, NULL);
 
 	if (list->head) {
-		iter = list->head;
+		RListIter *iter = list->head;
 		if (list->head == list->tail) {
 			list->head = list->tail = NULL;
 		} else {
@@ -368,7 +362,7 @@ R_API void r_list_reverse(RList *list) {
 	list->tail = tmp;
 }
 
-R_API RList *r_list_clone(RList *list) {
+R_API RList *r_list_clone(const RList *list) {
 	RList *l = NULL;
 	RListIter *iter;
 	void *data;
@@ -422,7 +416,7 @@ R_API int r_list_set_n(RList *list, int n, void *p) {
 	int i;
 
 	r_return_val_if_fail (list, false);
-	for (it = list->head, i = 0; it && it->data; it = it->n, i++) {
+	for (it = list->head, i = 0; it ; it = it->n, i++) {
 		if (i == n) {
 			if (list->free) {
 				list->free (it->data);
@@ -607,6 +601,18 @@ R_API RList *r_list_uniq(const RList *list, RListComparator cmp) {
 		}
 	}
 	return nl;
+}
+R_API char *r_list_to_str(RList *list, char ch) {
+	RListIter *iter;
+	RStrBuf *buf = r_strbuf_new ("");
+	if (!buf) {
+		return NULL;
+	}
+	char *item;
+	r_list_foreach (list, iter, item) {
+		r_strbuf_appendf (buf, "%s%c", item, ch);
+	}
+	return r_strbuf_drain (buf);
 }
 
 #if TEST

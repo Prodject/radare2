@@ -15,14 +15,10 @@ ut32 readLE32(RBuffer *buf, int off) {
 	ut32 num = 0;
 	(void)r_buf_read_at (buf, off, (ut8 *)&num, 4);
 	return num;
-	//const ut8 *data = r_buf_get_at (buf, off, &left);
-	//return left > 3? r_read_le32 (data): 0;
 }
 
 ut64 readLE64(RBuffer *buf, int off) {
-	int left = 0;
-	const ut8 *data = r_buf_get_at (buf, off, &left);
-	return left > 7? r_read_le64 (data): 0;
+	return r_buf_size (buf) >= off + 8? r_buf_read_le64_at (buf, off): 0;
 }
 
 static char *readString(RBuffer *buf, int off) {
@@ -70,8 +66,8 @@ static void walkSymbols (RBuffer *buf, RBinNXOObj *bin, ut64 symtab, ut64 strtab
 			free (symName);
 			break;
 		}
-		sym->type = r_str_const (R_BIN_TYPE_FUNC_STR);
-		sym->bind = r_str_const ("NONE");
+		sym->type = R_BIN_TYPE_FUNC_STR;
+		sym->bind = "NONE";
 		sym->size = size;
 
 		if (addr == 0) {
@@ -87,17 +83,18 @@ static void walkSymbols (RBuffer *buf, RBinNXOObj *bin, ut64 symtab, ut64 strtab
 			if (!imp->name) {
 				goto out_walk_symbol;
 			}
-			imp->type = r_str_const ("FUNC");
+			imp->type = "FUNC";
 			if (!imp->type) {
 				goto out_walk_symbol;
 			}
-			imp->bind = r_str_const ("NONE");
+			imp->bind = "NONE";
 			if (!imp->bind) {
 				goto out_walk_symbol;
 			}
 			imp->ordinal = bin->imports_list->length;
 			r_list_append (bin->imports_list, imp);
-			sym->name = r_str_newf ("imp.%s", symName);
+			sym->is_imported = true;
+			sym->name = strdup (symName);
 			if (!sym->name) {
 				goto out_walk_symbol;
 			}

@@ -6,6 +6,7 @@
 #include <r_types.h>
 #include <r_diff.h>
 #include <r_regex.h>
+#include <r_getopt.h>
 #include <r_list.h> // radare linked list
 #include <r_skiplist.h> // skiplist
 #include <r_flist.h> // radare fixed pointer array iterators
@@ -28,7 +29,9 @@ int gettimeofday (struct timeval* p, void* tz);
 #include "r_util/r_assert.h"
 #include "r_util/r_itv.h"
 #include "r_util/r_signal.h"
+#include "r_util/r_alloc.h"
 #include "r_util/r_rbtree.h"
+#include "r_util/r_intervaltree.h"
 #include "r_util/r_big.h"
 #include "r_util/r_base64.h"
 #include "r_util/r_base91.h"
@@ -45,6 +48,7 @@ int gettimeofday (struct timeval* p, void* tz);
 #include "r_util/r_mem.h"
 #include "r_util/r_name.h"
 #include "r_util/r_num.h"
+#include "r_util/r_table.h"
 #include "r_util/r_graph.h"
 #include "r_util/r_panels.h"
 #include "r_util/r_pool.h"
@@ -59,6 +63,7 @@ int gettimeofday (struct timeval* p, void* tz);
 #include "r_util/r_ascii_table.h"
 #include "r_util/r_strbuf.h"
 #include "r_util/r_strpool.h"
+#include "r_util/r_str_constpool.h"
 #include "r_util/r_sys.h"
 #include "r_util/r_tree.h"
 #include "r_util/r_uleb128.h"
@@ -67,10 +72,10 @@ int gettimeofday (struct timeval* p, void* tz);
 #include "r_util/r_utf32.h"
 #include "r_util/r_idpool.h"
 #include "r_util/r_asn1.h"
-#include "r_util/r_json.h"
 #include "r_util/pj.h"
 #include "r_util/r_x509.h"
 #include "r_util/r_pkcs7.h"
+#include "r_util/r_protobuf.h"
 // requires io, core, ... #include "r_util/r_print.h"
 
 #ifdef __cplusplus

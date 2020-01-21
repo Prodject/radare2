@@ -501,15 +501,6 @@ static ut32 mem_barrier (ArmOp *op, ut64 addr, int k) {
 
 #include "armass64_const.h"
 
-static ut32 msrk(ut16 v) {
-	ut32 r = 0;
-	ut32 a = ((v >> 12) & 0xf) << 1;
-	ut32 b = ((v & 0xfff) >> 3) & 0xff;
-	r |= a << 8;
-	r |= b << 16;
-	return r;
-}
-
 static ut32 msr(ArmOp *op, int w) {
 	ut32 data = UT32_MAX;
 	ut32 seq_data = UT32_MAX;
@@ -745,13 +736,24 @@ static ut32 arithmetic (ArmOp *op, int k) {
 	data += op->operands[0].reg << 24;
 	data += (op->operands[1].reg & 7) << (24 + 5);
 	data += (op->operands[1].reg >> 3) << 16;
-	if (op->operands[2].reg_type & ARM_REG64) {
+	if (op->operands[2].type & ARM_GPR) {
 		data += op->operands[2].reg << 8;
 	} else {
 		data += (op->operands[2].reg & 0x3f) << 18;
 		data += (op->operands[2].reg >> 6) << 8;
 	}
 	return data;
+}
+
+static ut32 neg(ArmOp *op) {
+	if (op->operands_count < 2) {
+		return -1;
+	}
+	op->operands_count++;
+	op->operands[2] = op->operands[1];
+	op->operands[1].reg = 31; // xzr
+
+	return arithmetic (op, 0xd1); // sub reg0, xzr, reg1
 }
 
 static bool parseOperands(char* str, ArmOp *op) {
@@ -769,7 +771,9 @@ static bool parseOperands(char* str, ArmOp *op) {
 	while (token) {
 		char *next = strchr (token, ',');
 		if (next) {
-			*next++ = 0;
+			// Change the ',' in token to null byte
+			// essentialy split the token by commas
+			*next++ = '\0';
 		}
 		while (token[0] == ' ') {
 			token++;
@@ -846,7 +850,14 @@ static bool parseOperands(char* str, ArmOp *op) {
 			op->operands_count ++;
 			op->operands[operand].type = ARM_GPR;
 			op->operands[operand].reg_type = ARM_REG64;
-			op->operands[operand].reg = r_num_math (NULL, token + 1);
+
+			if (!strncmp(token + 1, "zr", 2)) {
+				// XZR
+				op->operands[operand].reg = 31;
+			} else {
+				op->operands[operand].reg = r_num_math (NULL, token + 1);
+			}
+
 			if (op->operands[operand].reg > 31) {
 				free (t);
 				return false;
@@ -856,7 +867,17 @@ static bool parseOperands(char* str, ArmOp *op) {
 			op->operands_count ++;
 			op->operands[operand].type = ARM_GPR;
 			op->operands[operand].reg_type = ARM_REG32;
-			op->operands[operand].reg = r_num_math (NULL, token + 1);
+
+			if (!strncmp(token + 1, "zr", 2)) {
+				// WZR
+				op->operands[operand].reg = 31;
+			} else if (!strncmp(token + 1, "sp", 2)) {
+				// WSP
+				op->operands[operand].reg = 31;
+			} else {
+				op->operands[operand].reg = r_num_math (NULL, token + 1);
+			}
+
 			if (op->operands[operand].reg > 31) {
 				free (t);
 				return false;
@@ -907,6 +928,15 @@ static bool parseOperands(char* str, ArmOp *op) {
 				op->operands[operand].mem_option = mem_opt;
 			}
 			break;
+		case '#':
+			if (token[1] == '-') {
+				op->operands[operand].sign = -1;
+			}
+			op->operands_count ++;
+			op->operands[operand].type = ARM_CONSTANT;
+			op->operands[operand].immediate = r_num_math (NULL, token + 1);
+			imm_count++;
+			break;
 		case '-':
 			op->operands[operand].sign = -1;
 			// falthru
@@ -941,6 +971,46 @@ static bool parseOpcode(const char *str, ArmOp *op) {
 	op->mnemonic = in;
 	space ++;
 	return parseOperands (space, op);
+}
+
+static bool handlePAC(ut32 *op, const char *str) {
+	if (!strcmp (str, "autiasp")) {
+		*op = 0xbf2303d5;
+		return true;
+	}
+	if (!strcmp (str, "autiaz")) {
+		*op = 0x9f2303d5;
+		return true;
+	}
+	if (!strcmp (str, "autibsp")) {
+		*op = 0xff2303d5;
+		return true;
+	}
+	if (!strcmp (str, "autibz")) {
+		*op = 0xdf2303d5;
+		return true;
+	}
+	if (!strcmp (str, "paciaz")) {
+		*op = 0x1f2303d5;
+		return true;
+	}
+	if (!strcmp (str, "pacibz")) {
+		*op = 0x5f2303d5;
+		return true;
+	}
+	if (!strcmp (str, "paciasp")) {
+		*op = 0x3f2303d5;
+		return true;
+	}
+	if (!strcmp (str, "pacibsp")) {
+		*op = 0x7f2303d5;
+		return true;
+	}
+	if (!strcmp (str, "retab")) {
+		*op = 0xff0f5fd6;
+		return true;
+	}
+	return false;
 }
 
 bool arm64ass(const char *str, ut64 addr, ut32 *op) {
@@ -1013,8 +1083,12 @@ bool arm64ass(const char *str, ut64 addr, ut32 *op) {
 		*op = arithmetic (&ops, 0xd1);
 		return *op != -1;
 	}
-	if (!strncmp (str, "add", 3)) { // w
+	if (!strncmp (str, "add x", 5)) {
 		*op = arithmetic (&ops, 0x91);
+		return *op != -1;
+	}
+	if (!strncmp (str, "add w", 5)) {
+		*op = arithmetic (&ops, 0x11);
 		return *op != -1;
 	}
 	if (!strncmp (str, "adr x", 5)) { // w
@@ -1025,9 +1099,17 @@ bool arm64ass(const char *str, ut64 addr, ut32 *op) {
 		*op = adrp (&ops, addr, 0x00000090);
 		return *op != -1;
 	}
+	if (!strncmp (str, "neg", 3)) {
+		*op = neg (&ops);
+		return *op != -1;
+	}
 	if (!strcmp (str, "isb")) {
 		*op = 0xdf3f03d5;
 		return *op != -1;
+	}
+	// PAC
+	if (handlePAC (op, str)) {
+		return true;
 	}
 	if (!strcmp (str, "nop")) {
 		*op = 0x1f2003d5;

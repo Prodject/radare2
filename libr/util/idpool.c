@@ -4,7 +4,7 @@
 #include <r_types.h>
 #include <string.h>
 #include <stdlib.h>
-#if __WINDOWS__ && !__CYGWIN__
+#if __WINDOWS__
 #include <search.h>
 #endif
 
@@ -294,6 +294,9 @@ R_API bool r_oids_add(ROIDStorage *storage, void *data, ut32 *id, ut32 *od) {
 	}
 	if (storage->psize <= storage->ptop) {
 		r_id_storage_delete (storage->data, *id);
+		return false;
+	}
+	if (!storage->permutation) {
 		return false;
 	}
 	*od = storage->ptop;

@@ -83,6 +83,10 @@ static int ref_cmp(const RAnalRef *a, const RAnalRef *b) {
 	return 0;
 }
 
+static void sortxrefs(RList *list) {
+	r_list_sort (list, (RListComparator)ref_cmp);
+}
+
 static void listxrefs(HtUP *m, ut64 addr, RList *list) {
 	if (addr == UT64_MAX) {
 		ht_up_foreach (m, mylistrefs_cb, list);
@@ -95,7 +99,6 @@ static void listxrefs(HtUP *m, ut64 addr, RList *list) {
 
 		ht_up_foreach (d, appendRef, list);
 	}
-	r_list_sort (list, (RListComparator)ref_cmp);
 }
 
 static void setxref(HtUP *m, ut64 from, ut64 to, int type) {
@@ -151,6 +154,7 @@ R_API int r_anal_xref_del(RAnal *anal, ut64 from, ut64 to) {
 
 R_API int r_anal_xrefs_from(RAnal *anal, RList *list, const char *kind, const RAnalRefType type, ut64 addr) {
 	listxrefs (anal->dict_refs, addr, list);
+	sortxrefs (list);
 	return true;
 }
 
@@ -160,6 +164,7 @@ R_API RList *r_anal_xrefs_get(RAnal *anal, ut64 to) {
 		return NULL;
 	}
 	listxrefs (anal->dict_xrefs, to, list);
+	sortxrefs (list);
 	if (r_list_empty (list)) {
 		r_list_free (list);
 		list = NULL;
@@ -173,6 +178,7 @@ R_API RList *r_anal_refs_get(RAnal *anal, ut64 from) {
 		return NULL;
 	}
 	listxrefs (anal->dict_refs, from, list);
+	sortxrefs (list);
 	if (r_list_empty (list)) {
 		r_list_free (list);
 		list = NULL;
@@ -186,6 +192,7 @@ R_API RList *r_anal_xrefs_get_from(RAnal *anal, ut64 to) {
 		return NULL;
 	}
 	listxrefs (anal->dict_refs, to, list);
+	sortxrefs (list);
 	if (r_list_empty (list)) {
 		r_list_free (list);
 		list = NULL;
@@ -194,13 +201,18 @@ R_API RList *r_anal_xrefs_get_from(RAnal *anal, ut64 to) {
 }
 
 R_API void r_anal_xrefs_list(RAnal *anal, int rad) {
-	bool is_first = true;
 	RListIter *iter;
 	RAnalRef *ref;
+	PJ *pj = NULL;
 	RList *list = r_anal_ref_list_new();
 	listxrefs (anal->dict_refs, UT64_MAX, list);
+	sortxrefs (list);
 	if (rad == 'j') {
-		anal->cb_printf ("[");
+		pj = pj_new ();
+		if (!pj) {
+			return;
+		}
+		pj_a (pj);
 	}
 	r_list_foreach (list, iter, ref) {
 		int t = ref->type ? ref->type: ' ';
@@ -234,27 +246,23 @@ R_API void r_anal_xrefs_list(RAnal *anal, int rad) {
 			break;
 		case 'j':
 			{
-				if (is_first) {
-					is_first = false;
-				} else {
-					anal->cb_printf (",");
-				}
-				anal->cb_printf ("{");
+				pj_o (pj);
 				char *name = anal->coreb.getNameDelta (anal->coreb.core, ref->at);
 				if (name) {
 					r_str_replace_ch (name, ' ', 0, true);
-					anal->cb_printf ("\"name\":\"%s\",", name);
+					pj_ks (pj, "name", name);
 					free (name);
 				}
-				anal->cb_printf ("\"from\":%"PFMT64d",\"type\":\"%s\",\"addr\":%"PFMT64d,
-					ref->at, r_anal_xrefs_type_tostring (t), ref->addr);
+				pj_kn (pj, "from", ref->at);
+				pj_ks (pj, "type", r_anal_xrefs_type_tostring (t));
+				pj_kn (pj, "addr", ref->addr);
 				name = anal->coreb.getNameDelta (anal->coreb.core, ref->addr);
 				if (name) {
 					r_str_replace_ch (name, ' ', 0, true);
-					anal->cb_printf (",\"refname\":\"%s\"", name);
+					pj_ks (pj, "refname", name);
 					free (name);
 				}
-				anal->cb_printf ("}");
+				pj_end (pj);
 			}
 			break;
 		default:
@@ -262,7 +270,9 @@ R_API void r_anal_xrefs_list(RAnal *anal, int rad) {
 		}
 	}
 	if (rad == 'j') {
-		anal->cb_printf ("]\n");
+		pj_end (pj);
+		anal->cb_printf ("%s\n", pj_string (pj));
+		pj_free (pj);
 	}
 	r_list_free (list);
 }
@@ -338,6 +348,7 @@ static RList *fcn_get_refs(RAnalFunction *fcn, HtUP *ht) {
 			listxrefs (ht, at, list);
 		}
 	}
+	sortxrefs (list);
 	return list;
 }
 

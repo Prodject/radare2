@@ -11,7 +11,7 @@ R_API char *r_time_stamp_to_str(ut32 timeStamp) {
 	rawtime = (time_t)timeStamp;
 	tminfo = localtime (&rawtime);
 	//tminfo = gmtime (&rawtime);
-	return r_str_trim (strdup (asctime (tminfo)));
+	return r_str_trim_dup (asctime (tminfo));
 #else
 	struct my_timezone {
 		int tz_minuteswest;     /* minutes west of Greenwich */
@@ -23,7 +23,11 @@ R_API char *r_time_stamp_to_str(ut32 timeStamp) {
 	gettimeofday (&tv, (void*) &tz);
 	gmtoff = (int) (tz.tz_minuteswest * 60); // in seconds
 	ts += (time_t)gmtoff;
-	return r_str_trim (strdup (ctime (&ts)));
+	char *res = strdup (ctime (&ts));
+	if (res) {
+		r_str_trim (res); // XXX we probably need an r_str_trim_dup()
+	}
+	return res;
 #endif
 }
 
@@ -99,8 +103,12 @@ R_API int r_print_date_unix(RPrint *p, const ut8 *buf, int len) {
 	if (p && len >= sizeof (ut32)) {
 		t = r_read_ble32 (buf, p->big_endian);
 		if (p->datefmt[0]) {
-			t += p->datezone * (60*60); 
-			p->cb_printf ("%s\n", r_time_stamp_to_str (t));
+			t += p->datezone * (60*60);
+			char *datestr = r_time_stamp_to_str (t);
+			if (datestr) {
+				p->cb_printf ("%s\n", datestr);
+				free (datestr);
+			}
 			ret = sizeof (time_t);
 		}
 	}

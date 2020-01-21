@@ -1,16 +1,14 @@
 r_flag_sources = [
   'flag.c',
   'tags.c',
-  'spaces.c',
   'zones.c'
 ]
 
 r_flag = library('r_flag', r_flag_sources,
   include_directories: [platform_inc],
-  c_args: library_cflags,
+  c_args: library_cflags + ['-DR_FLAG_SRC=1'],
   dependencies: [
-    r_util_dep,
-    sdb_dep
+    r_util_dep
   ],
   install: true,
   implicit_include_directories: false,
